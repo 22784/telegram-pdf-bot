@@ -1,0 +1,6 @@
+pyTelegramBotAPI
+pymongo
+dnspython
+google-generativeai
+PyMuPDF
+Flask
