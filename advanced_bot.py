@@ -10,12 +10,13 @@ import time
 from flask import Flask
 from threading import Thread
 
-# ——— कन्फिगरेसन (आफ्नो विवरण यहाँ भर्नुहोस्) ———
-BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
-MONGO_URI = "YOUR_MONGO_URI"
-API_KEYS = ["YOUR_GEMINI_API_KEY_1", "YOUR_GEMINI_API_KEY_2"] # यहाँ अपनी सभी Gemini API Key डालें
-ADMIN_ID = 123456789  # तपाईंको Telegram User ID
-BACKUP_CHANNEL_ID = -100xxxxxxxxxx # तपाईंको निजी च्यानलको ID
+# ——— कन्फिगरेसन (Render Environment Variables बाट पढ्ने) ———
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+MONGO_URI = os.getenv("MONGO_URI")
+# একাধিক API कुञ्जीहरूलाई अल्पविराम (comma) द्वारा छुट्याएर एउटै लाइनमा राख्नुहोस्
+API_KEYS = [key.strip() for key in os.getenv("API_KEYS", "").split(',') if key.strip()]
+ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
+BACKUP_CHANNEL_ID = int(os.getenv("BACKUP_CHANNEL_ID", 0))
 
 DOWNLOAD_PATH = "temp_pdfs"
 if not os.path.exists(DOWNLOAD_PATH):
@@ -30,7 +31,7 @@ notes_collection = db['Notes']
 counters_collection = db['Counters']
 history_collection = db['Chat_History']
 
-genai.configure(api_key=GEMINI_API_KEY)
+# genai.configure अब call_gemini_smart भित्र ह्यान्डल गरिन्छ
 MODELS = ["gemini-1.5-flash", "gemini-1.5-pro"]
 
 # ——— RENDER KEEP-ALIVE SERVER ———
