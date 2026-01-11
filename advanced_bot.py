@@ -22,9 +22,12 @@ DOWNLOAD_PATH = "temp_pdfs"
 if not os.path.exists(DOWNLOAD_PATH):
     os.makedirs(DOWNLOAD_PATH)
 
+import certifi
+
 # ——— INITIALIZATION ———
 bot = telebot.TeleBot(BOT_TOKEN)
-client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+# MongoDB Timeout र certifi SSL कॉन्फिगरेसन थपियो
+client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000, tlsCAFile=certifi.where())
 db = client['TelegramBotDB']
 pdf_collection = db['PDF_Store']
 notes_collection = db['Notes']
