@@ -7,13 +7,12 @@ import os
 import json
 import re
 import time
-from flask import Flask
-from threading import Thread
+import sys
+import traceback
 
 # ——— कन्फिगरेसन (Render Environment Variables बाट पढ्ने) ———
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
-# একাধিক API कुञ्जीहरूलाई अल्पविराम (comma) द्वारा छुट्याएर एउटै लाइनमा राख्नुहोस्
 API_KEYS = [key.strip() for key in os.getenv("API_KEYS", "").split(',') if key.strip()]
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
 BACKUP_CHANNEL_ID = int(os.getenv("BACKUP_CHANNEL_ID", 0))
@@ -22,44 +21,42 @@ DOWNLOAD_PATH = "temp_pdfs"
 if not os.path.exists(DOWNLOAD_PATH):
     os.makedirs(DOWNLOAD_PATH)
 
-import certifi
-
-# ——— INITIALIZATION ———
-bot = telebot.TeleBot(BOT_TOKEN)
-# MongoDB Timeout र certifi SSL कॉन्फिगरेसन थपियो
-client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000, tlsCAFile=certifi.where())
+# ——— INITIALIZATION (Render-optimized) ———
+bot = telebot.TeleBot(BOT_TOKEN, threaded=True) # Threaded mode for performance
+client = MongoClient(
+    MONGO_URI,
+    serverSelectionTimeoutMS=5000,
+    socketTimeoutMS=20000,
+    connectTimeoutMS=20000,
+    tlsCAFile=certifi.where()
+)
 db = client['TelegramBotDB']
 pdf_collection = db['PDF_Store']
 notes_collection = db['Notes']
 counters_collection = db['Counters']
 history_collection = db['Chat_History']
 
-# genai.configure अब call_gemini_smart भित्र ह्यान्डल गरिन्छ
 MODELS = ["gemini-1.5-flash", "gemini-1.5-pro"]
 
-# ——— RENDER KEEP-ALIVE SERVER ———
-app = Flask('')
-@app.route('/')
-def home():
-    return "I am alive!"
-
-def run_server():
-  app.run(host='0.0.0.0', port=8080)
-
-def keep_alive():
-    t = Thread(target=run_server)
-    t.start()
-
 # ——— CORE HELPER FUNCTIONS ———
+
+def log_exception(e):
+    """विस्तृत त्रुटि लग गर्नका लागि।"""
+    print(f"An exception occurred: {e}")
+    traceback.print_exc(file=sys.stdout)
+
 def clean_json(raw_text):
     match = re.search(r'\{.*\}', raw_text, re.DOTALL)
     return match.group(0) if match else raw_text
 
 def get_embedding(text):
+    """पाठलाई भेक्टर (इम्बेडिङ) मा रूपान्तरण गर्छ।"""
     try:
-        return genai.embed_content(model="models/text-embedding-004", content=text, task_type="retrieval_document")['embedding']
+        # Using the more stable embedding-001 model as recommended
+        return genai.embed_content(model="models/embedding-001", content=text, task_type="retrieval_document")['embedding']
     except Exception as e:
-        print(f"इम्बेडिङ बनाउँदा त्रुटि: {e}")
+        print("Embedding error:", e)
+        log_exception(e)
         return None
 
 def get_next_serial_number(sequence_name):
@@ -77,6 +74,7 @@ def extract_text_from_pdf(file_path):
         return text if len(text.strip()) >= 100 else None
     except Exception as e:
         print(f"PDF पाठ निकाल्दा त्रुटि: {e}")
+        log_exception(e)
         return None
 
 def extract_vision_text(file_path):
@@ -94,22 +92,22 @@ def extract_vision_text(file_path):
         return response.text
     except Exception as e:
         print(f"Vision OCR असफल भयो: {e}")
+        log_exception(e)
         return None
     finally:
+        # FIX: Ensure temp image is always deleted
         if os.path.exists(img_path):
             os.remove(img_path)
 
 def send_long_message(chat_id, text, reply_to_message_id=None, parse_mode="Markdown"):
-    """टेलीग्रामको क्यारेक्टर लिमिटलाई ह्यान्डल गर्दै लामो सन्देशहरू पठाउँछ।"""
-    if not text:
-        return
+    if not text: return
     if len(text) <= 4000:
         bot.send_message(chat_id, text, reply_to_message_id=reply_to_message_id, parse_mode=parse_mode)
     else:
         parts = [text[i:i+4000] for i in range(0, len(text), 4000)]
         for part in parts:
-            bot.send_message(chat_id, part, reply_to_message_id=reply_to_message_id, parse_mode=parse_mode)
-            time.sleep(1) # Spam filtering से बचने के लिए
+            bot.send_message(chat_id, part, parse_mode="Markdown") # reply_to only for first part maybe
+            time.sleep(1)
 
 def get_chat_history(user_id):
     history = history_collection.find({"user_id": user_id}).sort("_id", -1).limit(10)
@@ -120,15 +118,14 @@ def get_chat_history(user_id):
     return formatted_history
 def save_chat_history(user_id, user_msg, bot_res):
     history_collection.insert_one({"user_id": user_id, "user_msg": user_msg, "bot_res": bot_res})
+
 def call_gemini_smart(prompt, history=[]):
-    """AI लाई कल गर्छ, फलब्याक तर्कका साथ (कुञ्जी र मोडल दुवैमा)।"""
     if not API_KEYS:
         print("API कुञ्जीहरू कन्फिगर गरिएका छैनन्!")
-        return "SERVICE_ERROR: API कुञ्जीहरू कन्फिगर गरिएका छैनन्।"
-
-    for key in API_KEYS: # प्रत्येक कुञ्जी प्रयोग गरी हेर्नुहोस्
+        return "SERVICE_ERROR: API keys are not configured."
+    for key in API_KEYS:
         genai.configure(api_key=key) 
-        for model_name in MODELS: # त्यसपछि प्रत्येक मोडल प्रयोग गरी हेर्नुहोस्
+        for model_name in MODELS:
             try:
                 model = genai.GenerativeModel(model_name)
                 if history:
@@ -138,10 +135,11 @@ def call_gemini_smart(prompt, history=[]):
                     response = model.generate_content(prompt)
                 return response.text
             except Exception as e:
-                print(f"कुञ्जी असफल भयो: {key[:5]}... मोडल: {model_name} त्रुटि: {e}. अर्को प्रयास गर्दैछु...")
-                time.sleep(1) # Rate limit बाट बच्न थोरै पर्खनुहोस्
-                continue # अर्को मोडल वा कुञ्जी प्रयास गर्नुहोस्
-    return "भाई, अहिले सबै AI कुञ्जीहरू र मोडलहरू व्यस्त छन्। केही बेर पछि प्रयास गर्नुहोस्।"
+                print(f"कुञ्जी असफल भयो: {key[:5]}... मोडल: {model_name}")
+                log_exception(e)
+                time.sleep(1)
+                continue
+    return "❌ All API keys and models failed."
 
 
 # ——— BOT MESSAGE HANDLERS ———
@@ -195,8 +193,8 @@ def handle_pdf_universal(message):
         bot.edit_message_text(f"✅ PDF #{serial_no} ({pdf_type}) '{message.document.file_name}' सफलतापूर्वक प्रशोधन र सुरक्षित गरियो।", status_msg.chat.id, status_msg.message_id)
 
     except Exception as e:
+        log_exception(e)
         bot.edit_message_text(f"माफ गर्नुहोस्, फाइल प्रशोधन गर्दा त्रुटि आयो: {e}", status_msg.chat.id, status_msg.message_id)
-        print(f"Universal handler error: {e}")
     finally:
         if file_path and os.path.exists(file_path): os.remove(file_path)
 
@@ -216,7 +214,9 @@ def retrieve_pdf(message):
         res = pdf_collection.find_one({"serial_number": index_no})
         if res: bot.send_document(ADMIN_ID, res['file_id'], caption=f"📄 Admin Copy: {res['file_name']}")
         else: bot.reply_to(message, "फाइल भेटिएन।")
-    except Exception as e: bot.reply_to(message, f"त्रुटि भयो: {e}")
+    except Exception as e: 
+        log_exception(e)
+        bot.reply_to(message, f"त्रुटि भयो: {e}")
 
 @bot.message_handler(commands=['ask_file'])
 def ask_from_file(message):
@@ -225,15 +225,25 @@ def ask_from_file(message):
     status_msg = bot.reply_to(message, "🔍 फाइलहरूमा खोज्दै...")
     try:
         vector = get_embedding(query)
-        results = list(pdf_collection.aggregate([{"$vectorSearch": {"index": "vector_index", "path": "embedding", "queryVector": vector, "numCandidates": 10, "limit": 1}}]))
+        if not vector:
+            return bot.edit_message_text("❌ AI Error: तपाईंको प्रश्नको लागि भेक्टर बनाउन सकिएन। कृपया आफ्नो API कुञ्जीहरू जाँच गर्नुहोस्।", status_msg.chat.id, status_msg.message_id)
+        
+        pipeline = [{"$vectorSearch": {"index": "vector_index", "path": "embedding", "queryVector": vector, "numCandidates": 10, "limit": 1}}]
+        results = list(pdf_collection.aggregate(pipeline))
         if not results: return bot.edit_message_text("❌ सम्बन्धित जानकारी भेटिएन।", message.chat.id, status_msg.message_id)
         
         context = results[0]['summary']
         prompt = f"Context from PDF: {context}\n\nUser Question: {query}\n\nAnswer based on context only:"
+        
+        bot.edit_message_text("✍️ सान्दर्भिक जानकारी भेटियो, जवाफ तयार पार्दै...", status_msg.chat.id, status_msg.message_id)
         ai_response = call_gemini_smart(prompt)
-        bot.delete_message(message.chat.id, status_msg.message_id) # Delete status message
+
+        bot.delete_message(message.chat.id, status_msg.message_id)
         send_long_message(message.chat.id, f"📄 **फाइलको आधारमा जवाफ:**\n\n{ai_response}", reply_to_message_id=message.message_id, parse_mode="Markdown")
-    except Exception as e: bot.edit_message_text(f"त्रुटि: {e}", message.chat.id, status_msg.message_id)
+
+    except Exception as e:
+        log_exception(e)
+        bot.edit_message_text(f"त्रुटि: {e}", status_msg.chat.id, status_msg.message_id)
 
 @bot.message_handler(commands=['quiz'])
 def generate_pdf_quiz(message):
@@ -250,7 +260,9 @@ def generate_pdf_quiz(message):
         data = json.loads(clean_json(ai_res))
         bot.send_poll(message.chat.id, question=data['question'][:255], options=[o[:100] for o in data['options']], correct_option_id=data['correct_option_id'], type='quiz', explanation=data.get('explanation', '')[:200])
         bot.delete_message(message.chat.id, status_msg.message_id)
-    except Exception as e: bot.edit_message_text(f"त्रुटि: {e}", message.chat.id, status_msg.message_id if 'status_msg' in locals() else message.message_id)
+    except Exception as e: 
+        log_exception(e)
+        bot.edit_message_text(f"त्रुटि: {e}", message.chat.id, status_msg.message_id if 'status_msg' in locals() else message.message_id)
 
 @bot.message_handler(func=lambda message: not message.text.startswith('/'))
 def handle_chat(message):
@@ -259,10 +271,15 @@ def handle_chat(message):
         bot.send_chat_action(message.chat.id, 'typing')
         res = call_gemini_smart(message.text, history)
         save_chat_history(message.from_user.id, message.text, res)
-        send_long_message(message.chat.id, bot_response, reply_to_message_id=message.message_id)
+        # FIX: Use the correct variable 'res' instead of 'bot_response'
+        send_long_message(message.chat.id, res, reply_to_message_id=message.message_id)
 
-# --- BOT START ---
+# ——— BOT START (Render Safe) ———
 if __name__ == "__main__":
-    keep_alive()
-    print("बोट लाइभ भयो...")
-    bot.infinity_polling(skip_pending=True)
+    print("Bot started...")
+    # These timeouts prevent the bot from getting stuck
+    bot.infinity_polling(
+        skip_pending=True,
+        timeout=30,
+        long_polling_timeout=30
+    )
