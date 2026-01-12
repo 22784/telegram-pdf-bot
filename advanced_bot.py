@@ -14,7 +14,7 @@ import traceback
 # ——— कन्फिगरेसन (Render Environment Variables बाट पढ्ने) ———
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
-API_KEYS = [key.strip() for key in os.getenv("API_KEYS", "").split(',') if key.strip()]
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") # Simplified to a single key
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
 BACKUP_CHANNEL_ID = int(os.getenv("BACKUP_CHANNEL_ID", 0))
 
@@ -37,6 +37,12 @@ notes_collection = db['Notes']
 counters_collection = db['Counters']
 history_collection = db['Chat_History']
 
+# Configure Gemini with the single API key
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+else:
+    print("WARNING: GEMINI_API_KEY environment variable not set.")
+
 MODELS = ["gemini-1.5-flash", "gemini-1.5-pro"]
 
 # ——— CORE HELPER FUNCTIONS ———
@@ -53,8 +59,13 @@ def clean_json(raw_text):
 def get_embedding(text):
     """पाठलाई भेक्टर (इम्बेडिङ) मा रूपान्तरण गर्छ।"""
     try:
-        # Using the more stable embedding-001 model as recommended
-        return genai.embed_content(model="models/embedding-001", content=text, task_type="retrieval_document")['embedding']
+        # Using the stable embedding-001 model as per user feedback
+        result = genai.embed_content(
+            model="models/embedding-001",
+            content=text,
+            task_type="retrieval_document"
+        )
+        return result['embedding']
     except Exception as e:
         print("Embedding error:", e)
         log_exception(e)
@@ -121,26 +132,24 @@ def save_chat_history(user_id, user_msg, bot_res):
     history_collection.insert_one({"user_id": user_id, "user_msg": user_msg, "bot_res": bot_res})
 
 def call_gemini_smart(prompt, history=[]):
-    if not API_KEYS:
-        print("API कुञ्जीहरू कन्फिगर गरिएका छैनन्!")
-        return "SERVICE_ERROR: API keys are not configured."
-    for key in API_KEYS:
-        genai.configure(api_key=key) 
-        for model_name in MODELS:
-            try:
-                model = genai.GenerativeModel(model_name)
-                if history:
-                    chat = model.start_chat(history=history)
-                    response = chat.send_message(prompt)
-                else:
-                    response = model.generate_content(prompt)
-                return response.text
-            except Exception as e:
-                print(f"कुञ्जी असफल भयो: {key[:5]}... मोडल: {model_name}")
-                log_exception(e)
-                time.sleep(1)
-                continue
-    return "❌ All API keys and models failed."
+    """Simplified smart call with model fallback."""
+    if not GEMINI_API_KEY:
+        return "SERVICE_ERROR: Gemini API key is not configured."
+    for model_name in MODELS:
+        try:
+            model = genai.GenerativeModel(model_name)
+            if history:
+                chat = model.start_chat(history=history)
+                response = chat.send_message(prompt)
+            else:
+                response = model.generate_content(prompt)
+            return response.text
+        except Exception as e:
+            print(f"Model {model_name} failed.")
+            log_exception(e)
+            time.sleep(1)
+            continue
+    return "❌ All AI models failed."
 
 
 # ——— BOT MESSAGE HANDLERS ———
