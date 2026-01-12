@@ -1,3 +1,4 @@
+import certifi
 import telebot
 from telebot.types import Message
 from pymongo import MongoClient
