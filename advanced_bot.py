@@ -2,7 +2,8 @@ import certifi
 import telebot
 from telebot.types import Message
 from pymongo import MongoClient
-import google.generativeai as genai
+import google.genai as genai
+from google.api_core.exceptions import ResourceExhausted
 import fitz  # PyMuPDF
 import os
 import json
@@ -75,6 +76,11 @@ def get_embedding(text):
             task_type="retrieval_document"
         )
         return result['embedding']
+    except ResourceExhausted as e:
+        print("Embedding quota error:", e)
+        log_exception(e)
+        # Return a specific error code or message
+        return "QUOTA_EXCEEDED"
     except Exception as e:
         print("Embedding error:", e)
         log_exception(e)
@@ -111,6 +117,10 @@ def extract_vision_text(file_path):
         img_file = genai.upload_file(img_path)
         response = model.generate_content(["Extract all text from this document page:", img_file])
         return response.text
+    except ResourceExhausted as e:
+        print(f"Vision OCR quota error: {e}")
+        log_exception(e)
+        return "QUOTA_EXCEEDED_VISION"
     except Exception as e:
         print(f"Vision OCR असफल भयो: {e}")
         log_exception(e)
@@ -153,6 +163,10 @@ def call_gemini_smart(prompt, history=[]):
             else:
                 response = model.generate_content(prompt)
             return response.text
+        except ResourceExhausted as e:
+            print(f"Model {model_name} quota error: {e}")
+            log_exception(e)
+            return "❌ AI Quota Error: The daily free limit for AI responses has been reached. Please try again tomorrow."
         except Exception as e:
             print(f"Model {model_name} failed.")
             log_exception(e)
@@ -189,6 +203,8 @@ def handle_pdf_universal(message):
         if not text:
             bot.edit_message_text(f"डिजिटल पाठ फेला परेन, Vision OCR प्रयास गर्दै...", status_msg.chat.id, status_msg.message_id)
             text = extract_vision_text(file_path)
+            if text == "QUOTA_EXCEEDED_VISION":
+                return bot.edit_message_text("❌ AI Quota Error: The daily free limit for processing scanned documents has been reached. Please try again tomorrow.", status_msg.chat.id, status_msg.message_id)
             pdf_type = "scanned"
         
         if not text: return bot.edit_message_text("❌ माफ गर्नुहोस्, यो PDF बाट कुनै पाठ निकाल्न सकिएन।", status_msg.chat.id, status_msg.message_id)
@@ -196,6 +212,8 @@ def handle_pdf_universal(message):
         summary_prompt = f"यो सामग्रीलाई खोज अनुक्रमणिकाको लागि २ वाक्यमा सारांश गर्नुहोस्: {text[:2000]}"
         summary = call_gemini_smart(summary_prompt)
         vector = get_embedding(summary)
+        if vector == "QUOTA_EXCEEDED":
+            return bot.edit_message_text("❌ AI Quota Error: The daily free limit for processing new documents has been reached. Please try again tomorrow.", status_msg.chat.id, status_msg.message_id)
         if not vector: return bot.edit_message_text("❌ AI Error: Vector generation failed. Try again.", status_msg.chat.id, status_msg.message_id)
         
         serial_no = get_next_serial_number('pdf_id')
@@ -244,6 +262,8 @@ def ask_from_file(message):
     status_msg = bot.reply_to(message, "🔍 फाइलहरूमा खोज्दै...")
     try:
         vector = get_embedding(query)
+        if vector == "QUOTA_EXCEEDED":
+            return bot.edit_message_text("❌ AI Quota Error: The daily free limit for asking questions has been reached. Please try again tomorrow.", status_msg.chat.id, status_msg.message_id)
         if not vector:
             return bot.edit_message_text("❌ AI Error: तपाईंको प्रश्नको लागि भेक्टर बनाउन सकिएन। कृपया आफ्नो API कुञ्जीहरू जाँच गर्नुहोस्।", status_msg.chat.id, status_msg.message_id)
         
