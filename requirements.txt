@@ -1,6 +1,7 @@
 pyTelegramBotAPI
 pymongo
 google-genai
+google-api-core
 pymupdf
 certifi
 Flask
