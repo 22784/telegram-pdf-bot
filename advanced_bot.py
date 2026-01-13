@@ -267,7 +267,7 @@ def ask_from_file(message):
         if not vector:
             return bot.edit_message_text("❌ AI Error: तपाईंको प्रश्नको लागि भेक्टर बनाउन सकिएन। कृपया आफ्नो API कुञ्जीहरू जाँच गर्नुहोस्।", status_msg.chat.id, status_msg.message_id)
         
-        pipeline = [{"$vectorSearch": {"index": "vector_index", "path": "embedding", "queryVector": vector, "numCandidates": 10, "limit": 1}}]
+        pipeline = [{" $vectorSearch": {"index": "vector_index", "path": "embedding", "queryVector": vector, "numCandidates": 10, "limit": 1}}]
         results = list(pdf_collection.aggregate(pipeline))
         if not results: return bot.edit_message_text("❌ सम्बन्धित जानकारी भेटिएन।", message.chat.id, status_msg.message_id)
         
