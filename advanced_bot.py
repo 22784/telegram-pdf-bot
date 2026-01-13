@@ -55,19 +55,10 @@ if GEMINI_API_KEY:
 else:
     print("WARNING: GEMINI_API_KEY missing")
 
-MODELS = [
-    "gemini-1.5-flash",
-    "gemini-1.5-pro",
-    "gemini-1.0-pro"
-]
-
-# अपडेटेड मॉडल लिस्ट (2026 के अनुसार)
-FREE_TIER_MODELS = [
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite", 
-    "gemini-2.5-flash-lite-preview-09-2025",
-    "gemini-2.0-flash-lite",
-    "gemini-1.5-flash",  # लेगेसी फेलबैक
+# Working model list as of Jan 2026, supporting vision
+WORKING_MODELS = [
+    "gemini-1.5-pro-latest", # Highest quality, good first choice
+    "gemini-1.5-flash-latest", # Faster alternative
 ]
 
 # क्वोटा ट्रैकिंग के लिए
@@ -145,13 +136,29 @@ def extract_vision_text(file_path):
             print(f"Error: Uploaded file is not active. State: {uploaded_file.state.name}")
             return None
 
-        # 3. फोटोबाट टेक्स्ट माग्ने
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        print("Generating content from image...")
-        result = model.generate_content(
-            ["Extract all text from this document page exactly as it is. Preserve Nepali text and Math formulas.", uploaded_file]
-        )
-        return result.text
+        # 3. फोटोबाट टेक्स्ट माग्ने (Fallback logic সহ)
+        prompt_parts = ["Extract all text from this document page exactly as it is. Preserve Nepali text and Math formulas.", uploaded_file]
+        
+        for model_name in WORKING_MODELS:
+            try:
+                print(f"Trying vision model: {model_name}")
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(prompt_parts)
+                # If we get a response, return it immediately
+                return response.text
+            except Exception as e:
+                error_msg = str(e).lower()
+                print(f"Vision model {model_name} failed: {error_msg}")
+                # If model is not found, or quota is hit, or it's an invalid argument for this model, try the next one.
+                if any(err in error_msg for err in ["404", "not found", "quota", "invalid argument"]):
+                    continue
+                else:
+                    log_exception(e)
+                    continue # Try next model even for other errors
+        
+        # If all models failed
+        print("All vision models failed to extract text.")
+        return None
         
     except Exception as e:
         print(f"Vision Error: {e}")
@@ -289,7 +296,7 @@ def call_gemini_smart_improved(prompt, history=None):
     
     contents.append({"role": "user", "parts": [{"text": prompt}]})
 
-    for model_name in FREE_TIER_MODELS: # Use the new FREE_TIER_MODELS list
+    for model_name in WORKING_MODELS: # Use the new WORKING_MODELS list
         if model_name in failed_models:
             continue
             
@@ -360,10 +367,13 @@ def handle_pdf(message):
         debug_msg = f"🔍 **DEBUG: Extracted Content ({method})**\n\n```\n{text[:800]}...\n```"
         bot.send_message(message.chat.id, debug_msg, parse_mode="Markdown")
 
-        # ३. सारांश र सेभ गर्ने (तपाईंको पुरानो लजिक जस्तै)
-        # यहाँ 'genai_client' को सट्टा सिधै मोडल प्रयोग गर्नुहोस्
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        summary = model.generate_content(f"Summarize this in 3 sentences: {text[:3000]}").text
+        # ३. सारांश र सेभ गर्ने (Fallback logic ব্যবহার করে)
+        summary_prompt = f"Summarize this in 3 sentences: {text[:4000]}"
+        summary = call_gemini_smart_improved(summary_prompt)
+
+        if not summary or "All AI services are temporarily unavailable" in summary:
+            return bot.edit_message_text("❌ AI Error: Could not generate a summary for the document.", message.chat.id, status_msg.message_id)
+        
         
         # Embedding (नयाँ तरिका)
         emb_result = genai.embed_content(
