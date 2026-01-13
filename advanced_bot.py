@@ -10,6 +10,7 @@ import json
 import re
 import time
 import sys
+import math
 import traceback
 
 from flask import Flask
@@ -71,6 +72,15 @@ def log_exception(e):
 def clean_json(raw_text):
     match = re.search(r'\{.*\}', raw_text, re.DOTALL)
     return match.group(0) if match else raw_text
+
+def cosine_similarity(a, b):
+    dot = sum(x*y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x*x for x in a))
+    norm_b = math.sqrt(sum(y*y for y in b))
+    # Handle potential zero division
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
 
 def get_embedding(text, task_type="RETRIEVAL_DOCUMENT"):
     try:
@@ -276,11 +286,27 @@ def ask_from_file(message):
         if not vector:
             return bot.edit_message_text("❌ AI Error: तपाईंको प्रश्नको लागि भेक्टर बनाउन सकिएन। कृपया आफ्नो API कुञ्जीहरू जाँच गर्नुहोस्।", status_msg.chat.id, status_msg.message_id)
         
-        pipeline = [{" $vectorSearch": {"index": "vector_index", "path": "embedding", "queryVector": vector, "numCandidates": 10, "limit": 1}}]
-        results = list(pdf_collection.aggregate(pipeline))
-        if not results: return bot.edit_message_text("❌ सम्बन्धित जानकारी भेटिएन।", message.chat.id, status_msg.message_id)
+        # Manual Similarity Search (Option 1 from user)
+        all_pdfs = list(pdf_collection.find({}, {"summary": 1, "embedding": 1, "_id": 0}))
         
-        context = results[0]['summary']
+        if not all_pdfs:
+            return bot.edit_message_text("❌ कुनै पनि PDF हरू भेटिएनन्। कृपया पहिले PDF अपलोड गर्नुहोस्।", message.chat.id, status_msg.message_id)
+
+        best_doc = None
+        best_score = -1
+
+        for doc in all_pdfs:
+            # Ensure the document has an embedding
+            if "embedding" in doc and doc["embedding"]:
+                score = cosine_similarity(vector, doc["embedding"])
+                if score > best_score:
+                    best_score = score
+                    best_doc = doc
+        
+        if not best_doc:
+            return bot.edit_message_text("❌ सम्बन्धित जानकारी भेटिएन।", message.chat.id, status_msg.message_id)
+
+        context = best_doc['summary']
         prompt = f"Context from PDF: {context}\n\nUser Question: {query}\n\nAnswer based on context only:"
         
         bot.edit_message_text("✍️ सान्दर्भिक जानकारी भेटियो, जवाफ तयार पार्दै...", status_msg.chat.id, status_msg.message_id)
@@ -291,7 +317,7 @@ def ask_from_file(message):
 
     except Exception as e:
         log_exception(e)
-        bot.edit_message_text(f"त्रुटि: {e}", status_msg.chat.id, status_msg.message_id)
+        bot.edit_message_text(f"माफ गर्नुहोस्, सोध्दा त्रुटि आयो: {e}", status_msg.chat.id, status_msg.message_id)
 
 @bot.message_handler(commands=['quiz'])
 def generate_pdf_quiz(message):
