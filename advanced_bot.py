@@ -654,25 +654,29 @@ def handle_chat(message):
             save_chat_history(message.from_user.id, message.text, res)
             send_long_message(message.chat.id, res, reply_to_message_id=message.message_id)
 
-# ——— UPDATED RUNNER ———
+# ——— BOT & SERVER RUNNER ———
 
 def run_polling():
-    # यो लुपले बोट बन्द हुन दिँदैन
+    """Runs the bot's polling loop in a resilient way."""
     while True:
         try:
             print("🤖 Bot Polling Started...")
             bot.infinity_polling(timeout=20, long_polling_timeout=20, skip_pending=True)
         except Exception as e:
-            print(f"Polling Crash: {e}")
+            print(f"💥 Polling Crash: {e}")
             log_exception(e)
+            print("Restarting polling in 5 seconds...")
             time.sleep(5)
 
+# Start the bot polling in a background thread.
+# This runs when the module is imported by Gunicorn.
+print("✅ Starting bot polling in a background thread...")
+threading.Thread(target=run_polling, daemon=True).start()
+
+# The if __name__ block is now only for local development.
+# Gunicorn will not run this, but it will run the code above.
 if __name__ == "__main__":
-    # बोटलाई छुट्टै Thread मा चलाउने
-    print("Starting bot polling in a background thread...")
-    threading.Thread(target=run_polling, daemon=True).start()
-    
-    # फ्लास्क (Render को लागि) मेन Thread मा चल्छ
+    # When running locally, Flask's dev server is used.
     port = int(os.environ.get("PORT", 10000))
-    print(f"Starting Flask web server on http://0.0.0.0:{port}")
+    print(f"Starting Flask dev server on http://0.0.0.0:{port}")
     app.run(host="0.0.0.0", port=port)
