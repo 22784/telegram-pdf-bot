@@ -388,7 +388,7 @@ def handle_pdf(message):
         serial = get_next_serial_number("pdf_id")
         pdf_collection.insert_one({
             "serial": serial,
-            "filename": message.document.file_name,
+            "file_name": message.document.file_name,
             "text": text,
             "summary": summary,
             "embedding": vector,
