@@ -171,9 +171,11 @@ def smart_pdf_extract(file_path):
         if len(text.strip()) < 50:
             print("Low quality text detected, switching to Vision OCR...")
             vision_text = extract_vision_text(file_path)
-            # If vision works, return its text. Otherwise, proceed with the low-quality text.
             if vision_text:
                 return vision_text, "Vision OCR (Image)"
+            else:
+                print("Vision OCR also failed to extract text.")
+                return text, "Vision OCR Failed"  # Return original text but with a failure status
         
         return text, "Digital Text"
     except Exception as e:
@@ -333,8 +335,12 @@ def handle_pdf(message):
         # १. स्मार्ट तरिकाले टेक्स्ट निकाल्ने (नयाँ कोड)
         text, method = smart_pdf_extract(file_path)
         
-        if not text or not text.strip():
-            return bot.edit_message_text("❌ फाइल खाली छ वा पढ्न सकिएन।", message.chat.id, status_msg.message_id)
+        # Improved error handling based on the method
+        if method in ["Vision OCR Failed", "Extraction Failed"] or not text or not text.strip():
+            error_msg = "❌ माफ गर्नुहोस्, यो PDF बाट कुनै पाठ निकाल्न सकिएन।"
+            if method == "Vision OCR Failed":
+                error_msg += "\n\n(AI Vision द्वारा पनि प्रयास गरियो तर असफल भयो।)" # Also tried with AI Vision but it failed.
+            return bot.edit_message_text(error_msg, message.chat.id, status_msg.message_id, parse_mode="Markdown")
 
         # २. डिबगिङ (तपाईंले माग्नुभएको फिचर): बोटले के पढ्यो भनेर हेर्ने
         # यो पछि हटाउन सकिन्छ
