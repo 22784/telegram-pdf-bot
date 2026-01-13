@@ -537,7 +537,8 @@ def ask_general_ai(message, query, status_msg=None):
                         "🤖 AI बाट सामान्य ज्ञान लिँदै छु...",
                         status_msg.chat.id,
                         status_msg.message_id
-                    )    else:
+                    )
+    else:
         status_msg = bot.reply_to(message, "🤖 AI बाट सामान्य ज्ञान लिँदै छु...")
     
     prompt = f"""
