@@ -49,11 +49,17 @@ history_collection = db['Chat_History']
 
 # Configure Gemini with the single API key
 if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+    from google.genai import Client
+    genai_client = Client(api_key=GEMINI_API_KEY)
 else:
     print("WARNING: GEMINI_API_KEY environment variable not set.")
+    genai_client = None
 
-MODELS = ["gemini-1.5-flash", "gemini-1.5-pro"]
+MODELS = [
+    "gemini-1.5-flash",
+    "gemini-1.5-pro",
+    "gemini-1.0-pro"
+]
 
 # ——— CORE HELPER FUNCTIONS ———
 
@@ -67,22 +73,16 @@ def clean_json(raw_text):
     return match.group(0) if match else raw_text
 
 def get_embedding(text):
-    """पाठलाई भेक्टर (इम्बेडिङ) मा रूपान्तरण गर्छ।"""
     try:
-        # Using the stable embedding-001 model as per user feedback
-        result = genai.embed_content(
+        res = genai_client.models.embed_content(
             model="models/embedding-001",
             content=text,
             task_type="retrieval_document"
         )
-        return result['embedding']
-    except ResourceExhausted as e:
-        print("Embedding quota error:", e)
-        log_exception(e)
-        # Return a specific error code or message
+        return res['embedding']
+    except ResourceExhausted:
         return "QUOTA_EXCEEDED"
     except Exception as e:
-        print("Embedding error:", e)
         log_exception(e)
         return None
 
@@ -112,10 +112,16 @@ def extract_vision_text(file_path):
         pix = page.get_pixmap()
         pix.save(img_path)
         doc.close()
-        
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        img_file = genai.upload_file(img_path)
-        response = model.generate_content(["Extract all text from this document page:", img_file])
+
+        uploaded_file = genai_client.files.upload(img_path)
+        response = genai_client.models.generate_content(
+            model="gemini-1.5-flash",
+            contents=[
+                "Extract all text from this document page:",
+                uploaded_file
+            ]
+        )
+        genai_client.files.delete(name=uploaded_file.name)
         return response.text
     except ResourceExhausted as e:
         print(f"Vision OCR quota error: {e}")
@@ -150,29 +156,30 @@ def get_chat_history(user_id):
 def save_chat_history(user_id, user_msg, bot_res):
     history_collection.insert_one({"user_id": user_id, "user_msg": user_msg, "bot_res": bot_res})
 
-def call_gemini_smart(prompt, history=[]):
-    """Simplified smart call with model fallback."""
-    if not GEMINI_API_KEY:
-        return "SERVICE_ERROR: Gemini API key is not configured."
+def call_gemini_smart(prompt, history=None):
+    if not genai_client:
+        return "❌ Gemini API key missing."
+
+    contents = []
+    if history:
+        contents.extend(history)
+    contents.append({"role": "user", "parts": [prompt]})
+
     for model_name in MODELS:
         try:
-            model = genai.GenerativeModel(model_name)
-            if history:
-                chat = model.start_chat(history=history)
-                response = chat.send_message(prompt)
-            else:
-                response = model.generate_content(prompt)
-            return response.text
-        except ResourceExhausted as e:
-            print(f"Model {model_name} quota error: {e}")
-            log_exception(e)
-            return "❌ AI Quota Error: The daily free limit for AI responses has been reached. Please try again tomorrow."
+            response = genai_client.models.generate_content(
+                model=f"models/{model_name}",
+                contents=contents
+            )
+            if response and response.text:
+                return response.text
+        except ResourceExhausted:
+            return "❌ AI Quota exhausted. Try tomorrow."
         except Exception as e:
-            print(f"Model {model_name} failed.")
-            log_exception(e)
+            print(f"⚠️ Model failed: {model_name} → {e}")
             time.sleep(1)
             continue
-    return "❌ All AI models failed."
+    return "❌ All Gemini models failed."
 
 
 # ——— BOT MESSAGE HANDLERS ———
