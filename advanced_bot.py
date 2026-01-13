@@ -57,8 +57,9 @@ else:
 
 # Working model list as of Jan 2026, supporting vision
 WORKING_MODELS = [
-    "gemini-1.5-pro-latest", # Highest quality, good first choice
-    "gemini-1.5-flash-latest", # Faster alternative
+    "models/gemini-2.5-flash",
+    "models/gemini-2.5-flash-lite",
+    "models/gemini-2.0-flash-lite",
 ]
 
 # क्वोटा ट्रैकिंग के लिए
@@ -302,7 +303,7 @@ def call_gemini_smart_improved(prompt, history=None):
             
         try:
             print(f"ट्राइंग मॉडल: {model_name}")
-            model = genai.GenerativeModel(f"models/{model_name}")
+            model = genai.GenerativeModel(model_name)
             response = model.generate_content(contents)
             if response and response.text:
                 return response.text
