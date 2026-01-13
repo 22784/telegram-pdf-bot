@@ -15,6 +15,7 @@ import traceback
 import requests
 from flask import Flask, request, jsonify
 import threading
+from PIL import Image
 
 app = Flask(__name__)
 
@@ -48,13 +49,11 @@ notes_collection = db['Notes']
 counters_collection = db['Counters']
 history_collection = db['Chat_History']
 
-# Configure Gemini with the single API key
+# API Setup
 if GEMINI_API_KEY:
-    from google.generativeai import Client
-    genai_client = Client(api_key=GEMINI_API_KEY)
+    genai.configure(api_key=GEMINI_API_KEY)
 else:
-    print("WARNING: GEMINI_API_KEY environment variable not set.")
-    genai_client = None
+    print("WARNING: GEMINI_API_KEY missing")
 
 MODELS = [
     "gemini-1.5-flash",
@@ -94,16 +93,15 @@ def cosine_similarity(a, b):
         return 0.0
     return dot / (norm_a * norm_b)
 
-def get_embedding(text, task_type="RETRIEVAL_DOCUMENT"):
+def get_embedding(text, task_type="retrieval_document"):
     try:
-        res = genai_client.models.embed_content(
-            model="text-embedding-004",
-            contents=text,
-            config={
-                "task_type": task_type,
-            }
+        # Use the new API for embedding
+        result = genai.embed_content(
+            model="models/text-embedding-004",
+            content=text,
+            task_type=task_type
         )
-        return res.embeddings[0].values
+        return result['embedding']
     except ResourceExhausted:
         return "QUOTA_EXCEEDED"
     except Exception as e:
@@ -117,55 +115,74 @@ def get_next_serial_number(sequence_name):
     )
     return sequence_doc['sequence_value']
 
-def extract_text_from_pdf(file_path):
-    try:
-        doc = fitz.open(file_path)
-        text = ""
-        for page in doc:
-            # यूनिकोड और लेआउट मोड का उपयोग
-            text += page.get_text("text", sort=True, flags=fitz.TEXT_DEHYPHENATE | fitz.TEXT_PRESERVE_WHITESPACE)
-        doc.close()
-        
-        # यदि टेक्स्ट कम है तो OCR का उपयोग
-        if len(text.strip()) < 100:
-            return extract_vision_text(file_path)
-        return text
-    except Exception as e:
-        print(f"PDF टेक्स्ट निकालने में त्रुटि: {e}")
-        log_exception(e)
-        return extract_vision_text(file_path)  # फेलबैक के रूप में OCR
-
 def extract_vision_text(file_path):
-    img_path = f"temp_scan_{os.path.basename(file_path)}.png"
+    """
+    यो फसनले PDF को पहिलो पेजलाई फोटोमा बदल्छ र Gemini Vision लाई पठाउँछ।
+    यसले नेपाली फन्ट र गणितीय फर्मुलाहरू (Math) एकदम सही निकाल्छ।
+    """
+    img_path = f"{file_path}_temp.png"
+    myfile = None # Initialize myfile to None
     try:
+        # 1. PDF लाई फोटोमा बदल्ने (Zoom गरेर)
         doc = fitz.open(file_path)
-        page = doc.load_page(0)
-        pix = page.get_pixmap()
+        mat = fitz.Matrix(2, 2) # 2x Zoom for better quality
+        pix = doc[0].get_pixmap(matrix=mat)
         pix.save(img_path)
         doc.close()
 
-        uploaded_file = genai_client.files.upload(img_path)
-        response = genai_client.models.generate_content(
-            model="gemini-1.5-flash",
-            contents=[
-                "Extract all text from this document page:",
-                uploaded_file
-            ]
+        # 2. Gemini मा फोटो अपलोड गर्ने
+        print("Uploading image to Gemini for OCR...")
+        myfile = genai.upload_file(path=img_path)
+        
+        # 3. फोटोबाट टेक्स्ट माग्ने
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        print("Generating content from image...")
+        result = model.generate_content(
+            ["Extract all text from this document page exactly as it is. Preserve Nepali text and Math formulas.", myfile]
         )
-        genai_client.files.delete(name=uploaded_file.name)
-        return response.text
-    except ResourceExhausted as e:
-        print(f"Vision OCR quota error: {e}")
-        log_exception(e)
-        return "QUOTA_EXCEEDED_VISION"
+        return result.text
     except Exception as e:
-        print(f"Vision OCR असफल भयो: {e}")
+        print(f"Vision Error: {e}")
         log_exception(e)
         return None
     finally:
-        # FIX: Ensure temp image is always deleted
+        # टेम्पोररी फोटो र আপলোড गरिएको फाइल डिलिट गर्ने
+        if myfile:
+            print(f"Deleting uploaded file: {myfile.name}")
+            genai.delete_file(myfile.name)
         if os.path.exists(img_path):
             os.remove(img_path)
+
+def smart_pdf_extract(file_path):
+    """
+    यो 'Smart' फसन हो। पहिले यसले सामान्य तरिकाले टेक्स्ट निकाल्न खोज्छ।
+    यदि टेक्स्ट बुझिएन वा एकदम कम आयो (जस्तै स्क्यान गरेको फाइल),
+    तब यसले माथिको 'extract_vision_text' प्रयोग गर्छ।
+    """
+    try:
+        # सामान्य तरिका (छिटो हुन्छ)
+        doc = fitz.open(file_path)
+        text = ""
+        for page in doc:
+            text += page.get_text()
+        doc.close()
+
+        # यदि टेक्स्ट ५० अक्षर भन्दा कम छ वा खाली छ भने -> Vision प्रयोग गर्ने
+        if len(text.strip()) < 50:
+            print("Low quality text detected, switching to Vision OCR...")
+            vision_text = extract_vision_text(file_path)
+            # If vision works, return its text. Otherwise, proceed with the low-quality text.
+            if vision_text:
+                return vision_text, "Vision OCR (Image)"
+        
+        return text, "Digital Text"
+    except Exception as e:
+        print(f"Standard text extraction failed: {e}. Falling back to Vision OCR.")
+        vision_text = extract_vision_text(file_path)
+        if vision_text:
+            return vision_text, "Fallback OCR"
+        else:
+            return None, "Extraction Failed"
 
 def send_long_message(chat_id, text, reply_to_message_id=None, parse_mode="Markdown"):
     if not text: return
@@ -263,10 +280,8 @@ def call_gemini_smart_improved(prompt, history=None):
             
         try:
             print(f"ट्राइंग मॉडल: {model_name}")
-            response = genai_client.models.generate_content(
-                model=f"models/{model_name}",
-                contents=contents
-            )
+            model = genai.GenerativeModel(f"models/{model_name}")
+            response = model.generate_content(contents)
             if response and response.text:
                 return response.text
             
@@ -300,58 +315,67 @@ def send_welcome(message):
     bot.reply_to(message, "नमस्ते! म तपाईंको निजी ज्ञान आधार (Knowledge Base) बोट हुँ।")
 
 @bot.message_handler(content_types=['document'])
-def handle_pdf_universal(message):
-    if message.document.mime_type != 'application/pdf': return
-    if message.document.file_size > 20 * 1024 * 1024: return bot.reply_to(message, "यो फाइल धेरै ठूलो छ (20MB+)।")
-    if pdf_collection.find_one({"file_id": message.document.file_id}):
-        try: bot.delete_message(message.chat.id, message.message_id)
-        except: pass
-        return bot.send_message(message.chat.id, f"यो PDF पहिले नै बचत गरिएको छ।")
+def handle_pdf(message):
+    if message.document.mime_type != 'application/pdf':
+        return bot.reply_to(message, "कृपया PDF फाइल मात्र पठाउनुहोस्।")
 
-    status_msg = bot.send_message(message.chat.id, f"⏳ '{message.document.file_name}' प्रशोधन गर्दै...")
-    file_path = None
+    status_msg = bot.send_message(message.chat.id, "📥 फाइल डाउनलोड र स्क्यान गर्दै...")
+    
+    # फाइल डाउनलोड
+    file_info = bot.get_file(message.document.file_id)
+    downloaded_file = bot.download_file(file_info.file_path)
+    file_path = os.path.join(DOWNLOAD_PATH, message.document.file_name)
+    
+    with open(file_path, 'wb') as f:
+        f.write(downloaded_file)
+
     try:
-        file_info = bot.get_file(message.document.file_id)
-        downloaded_file = bot.download_file(file_info.file_path)
-        file_path = os.path.join(DOWNLOAD_PATH, message.document.file_name)
-        with open(file_path, 'wb') as new_file: new_file.write(downloaded_file)
+        # १. स्मार्ट तरिकाले टेक्स्ट निकाल्ने (नयाँ कोड)
+        text, method = smart_pdf_extract(file_path)
+        
+        if not text or not text.strip():
+            return bot.edit_message_text("❌ फाइल खाली छ वा पढ्न सकिएन।", message.chat.id, status_msg.message_id)
 
-        text = extract_text_from_pdf(file_path)
-        pdf_type = "digital"
-        if not text:
-            bot.edit_message_text(f"डिजिटल पाठ फेला परेन, Vision OCR प्रयास गर्दै...", status_msg.chat.id, status_msg.message_id)
-            text = extract_vision_text(file_path)
-            if text == "QUOTA_EXCEEDED_VISION":
-                return bot.edit_message_text("❌ AI Quota Error: The daily free limit for processing scanned documents has been reached. Please try again tomorrow.", status_msg.chat.id, status_msg.message_id)
-            pdf_type = "scanned"
-        
-        if not text: return bot.edit_message_text("❌ माफ गर्नुहोस्, यो PDF बाट कुनै पाठ निकाल्न सकिएन।", status_msg.chat.id, status_msg.message_id)
+        # २. डिबगिङ (तपाईंले माग्नुभएको फिचर): बोटले के पढ्यो भनेर हेर्ने
+        # यो पछि हटाउन सकिन्छ
+        debug_msg = f"🔍 **DEBUG: Extracted Content ({method})**\n\n```\n{text[:800]}...\n```"
+        bot.send_message(message.chat.id, debug_msg, parse_mode="Markdown")
 
-        summary_prompt = f"यो सामग्रीलाई खोज अनुक्रमणिकाको लागि २ वाक्यमा सारांश गर्नुहोस्: {text[:2000]}"
-        summary = call_gemini_smart_improved(summary_prompt)
-        vector = get_embedding(summary, task_type="RETRIEVAL_DOCUMENT")
-        if vector == "QUOTA_EXCEEDED":
-            return bot.edit_message_text("❌ AI Quota Error: The daily free limit for processing new documents has been reached. Please try again tomorrow.", status_msg.chat.id, status_msg.message_id)
-        if not vector: return bot.edit_message_text("❌ AI Error: Vector generation failed. Try again.", status_msg.chat.id, status_msg.message_id)
+        # ३. सारांश र सेभ गर्ने (तपाईंको पुरानो लजिक जस्तै)
+        # यहाँ 'genai_client' को सट्टा सिधै मोडल प्रयोग गर्नुहोस्
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        summary = model.generate_content(f"Summarize this in 3 sentences: {text[:3000]}").text
         
-        serial_no = get_next_serial_number('pdf_id')
-        backup_msg = bot.forward_message(BACKUP_CHANNEL_ID, message.chat.id, message.message_id)
-        
+        # Embedding (नयाँ तरिका)
+        emb_result = genai.embed_content(
+            model="models/text-embedding-004",
+            content=summary,
+            task_type="retrieval_document"
+        )
+        vector = emb_result['embedding']
+
+        # DB मा सेभ
+        serial = get_next_serial_number("pdf_id")
         pdf_collection.insert_one({
-            "serial_number": serial_no, "file_name": message.document.file_name, "file_id": message.document.file_id,
-            "summary": summary, "embedding": vector, "full_text": text, "type": pdf_type, "backup_msg_id": backup_msg.message_id,
-            "uploader_id": message.from_user.id
+            "serial": serial,
+            "filename": message.document.file_name,
+            "text": text,
+            "summary": summary,
+            "embedding": vector,
+            "uploader": message.from_user.id
         })
 
-        try: bot.delete_message(message.chat.id, message.message_id)
-        except: pass
-        bot.edit_message_text(f"✅ PDF #{serial_no} ({pdf_type}) '{message.document.file_name}' सफलतापूर्वक प्रशोधन र सुरक्षित गरियो।", status_msg.chat.id, status_msg.message_id)
+        bot.edit_message_text(
+            f"✅ **PDF #{serial} सुरक्षित भयो!**\n\n📝 **सारांश:**\n{summary}", 
+            message.chat.id, status_msg.message_id, parse_mode="Markdown"
+        )
 
     except Exception as e:
-        log_exception(e)
-        bot.edit_message_text(f"माफ गर्नुहोस्, फाइल प्रशोधन गर्दा त्रुटि आयो: {e}", status_msg.chat.id, status_msg.message_id)
+        log_exception(e) # Use the logging helper
+        bot.edit_message_text(f"❌ त्रुटि आयो: {str(e)}", message.chat.id, status_msg.message_id)
     finally:
-        if file_path and os.path.exists(file_path): os.remove(file_path)
+        if os.path.exists(file_path):
+            os.remove(file_path)
 
 @bot.message_handler(commands=['get'])
 def retrieve_pdf(message):
@@ -630,11 +654,25 @@ def handle_chat(message):
             save_chat_history(message.from_user.id, message.text, res)
             send_long_message(message.chat.id, res, reply_to_message_id=message.message_id)
 
-# ——— BOT START (Render Safe) ———
-def run_bot():
-    bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=30)
+# ——— UPDATED RUNNER ———
+
+def run_polling():
+    # यो लुपले बोट बन्द हुन दिँदैन
+    while True:
+        try:
+            print("🤖 Bot Polling Started...")
+            bot.infinity_polling(timeout=20, long_polling_timeout=20, skip_pending=True)
+        except Exception as e:
+            print(f"Polling Crash: {e}")
+            log_exception(e)
+            time.sleep(5)
 
 if __name__ == "__main__":
-    print("Bot started...")
-    threading.Thread(target=run_bot).start()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    # बोटलाई छुट्टै Thread मा चलाउने
+    print("Starting bot polling in a background thread...")
+    threading.Thread(target=run_polling, daemon=True).start()
+    
+    # फ्लास्क (Render को लागि) मेन Thread मा चल्छ
+    port = int(os.environ.get("PORT", 10000))
+    print(f"Starting Flask web server on http://0.0.0.0:{port}")
+    app.run(host="0.0.0.0", port=port)
