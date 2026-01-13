@@ -427,7 +427,7 @@ def ask_from_file(message):
                     best_doc = doc
         
         # Step 2: अगर कोई PDF नहीं मिला या स्कोर कम है
-                if not best_doc or best_score < 0.65: # 0.65 is the similarity threshold
+                if not best_doc or best_score < 0.50: # 0.50 is the similarity threshold
                     bot.edit_message_text(
                         "📭 फाइलमा जानकारी भेटिएन, AI बाट सामान्य जवाफ लिँदै छु...",
                         status_msg.chat.id,
