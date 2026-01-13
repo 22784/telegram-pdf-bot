@@ -11,6 +11,15 @@ import time
 import sys
 import traceback
 
+from flask import Flask
+import threading
+
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "Bot is running"
+
 # ——— कन्फिगरेसन (Render Environment Variables बाट पढ्ने) ———
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
@@ -285,11 +294,10 @@ def handle_chat(message):
         send_long_message(message.chat.id, res, reply_to_message_id=message.message_id)
 
 # ——— BOT START (Render Safe) ———
+def run_bot():
+    bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=30)
+
 if __name__ == "__main__":
     print("Bot started...")
-    # These timeouts prevent the bot from getting stuck
-    bot.infinity_polling(
-        skip_pending=True,
-        timeout=30,
-        long_polling_timeout=30
-    )
+    threading.Thread(target=run_bot).start()
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
