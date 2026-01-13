@@ -328,7 +328,7 @@ def handle_pdf_universal(message):
         if not text: return bot.edit_message_text("❌ माफ गर्नुहोस्, यो PDF बाट कुनै पाठ निकाल्न सकिएन।", status_msg.chat.id, status_msg.message_id)
 
         summary_prompt = f"यो सामग्रीलाई खोज अनुक्रमणिकाको लागि २ वाक्यमा सारांश गर्नुहोस्: {text[:2000]}"
-        summary = call_gemini_smart(summary_prompt)
+        summary = call_gemini_smart_improved(summary_prompt)
         vector = get_embedding(summary, task_type="RETRIEVAL_DOCUMENT")
         if vector == "QUOTA_EXCEEDED":
             return bot.edit_message_text("❌ AI Quota Error: The daily free limit for processing new documents has been reached. Please try again tomorrow.", status_msg.chat.id, status_msg.message_id)
