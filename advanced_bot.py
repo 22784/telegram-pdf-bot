@@ -445,7 +445,8 @@ def ask_from_file(message):
                         f"_💡 नोट: यो जवाफ मेरो सामान्य जानकारीमा आधारित छ, कुनै विशेष फाइलबाट होइन।_",
                         reply_to_message_id=message.message_id,
                         parse_mode="Markdown"
-                    )            return
+                    )
+                    return
         
         # Step 3: PDF मिला है - सबसे relevant PDF का उपयोग करें
         context = best_doc['full_text'] if 'full_text' in best_doc else best_doc['summary']
