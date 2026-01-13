@@ -12,8 +12,8 @@ import time
 import sys
 import math
 import traceback
-
-from flask import Flask
+import requests
+from flask import Flask, request, jsonify
 import threading
 
 app = Flask(__name__)
@@ -62,6 +62,18 @@ MODELS = [
     "gemini-1.0-pro"
 ]
 
+# अपडेटेड मॉडल लिस्ट (2026 के अनुसार)
+FREE_TIER_MODELS = [
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite", 
+    "gemini-2.5-flash-lite-preview-09-2025",
+    "gemini-2.0-flash-lite",
+    "gemini-1.5-flash",  # लेगेसी फेलबैक
+]
+
+# क्वोटा ट्रैकिंग के लिए
+failed_models = set()
+
 # ——— CORE HELPER FUNCTIONS ———
 
 def log_exception(e):
@@ -108,13 +120,20 @@ def get_next_serial_number(sequence_name):
 def extract_text_from_pdf(file_path):
     try:
         doc = fitz.open(file_path)
-        text = "".join(page.get_text() for page in doc)
+        text = ""
+        for page in doc:
+            # यूनिकोड और लेआउट मोड का उपयोग
+            text += page.get_text("text", sort=True, flags=fitz.TEXT_DEHYPHENATE | fitz.TEXT_PRESERVE_WHITESPACE)
         doc.close()
-        return text if len(text.strip()) >= 100 else None
+        
+        # यदि टेक्स्ट कम है तो OCR का उपयोग
+        if len(text.strip()) < 100:
+            return extract_vision_text(file_path)
+        return text
     except Exception as e:
-        print(f"PDF पाठ निकाल्दा त्रुटि: {e}")
+        print(f"PDF टेक्स्ट निकालने में त्रुटि: {e}")
         log_exception(e)
-        return None
+        return extract_vision_text(file_path)  # फेलबैक के रूप में OCR
 
 def extract_vision_text(file_path):
     img_path = f"temp_scan_{os.path.basename(file_path)}.png"
@@ -168,30 +187,110 @@ def get_chat_history(user_id):
 def save_chat_history(user_id, user_msg, bot_res):
     history_collection.insert_one({"user_id": user_id, "user_msg": user_msg, "bot_res": bot_res})
 
-def call_gemini_smart(prompt, history=None):
-    if not genai_client:
-        return "❌ Gemini API key missing."
+def fallback_to_alternative_api(prompt):
+    """अन्य फ्री एपीआई का उपयोग (OpenAI, HuggingFace, आदि)"""
+    import requests
+    
+    try:
+        # HuggingFace Inference API (फ्री)
+        
+        # वैकल्पिक 1: HuggingFace Zephyr
+        hf_token = os.getenv('HF_TOKEN')
+        if hf_token:
+            hf_response = requests.post(
+                "https://api-inference.huggingface.co/models/HuggingFaceH4/zephyr-7b-beta",
+                headers={"Authorization": f"Bearer {hf_token}"},
+                json={"inputs": prompt}
+            )
+            
+            if hf_response.status_code == 200:
+                generated_text = hf_response.json()[0]['generated_text']
+                # Clean up prompt from response if present
+                if generated_text.startswith(prompt):
+                    return generated_text[len(prompt):].strip()
+                return generated_text
+                
+        # वैकल्पिक 2: OpenRouter (फ्री मॉडल)
+        openrouter_key = os.getenv('OPENROUTER_KEY')
+        if openrouter_key:
+            openrouter_response = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {openrouter_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "google/gemini-2.0-flash-lite:free", # Using a free model on OpenRouter
+                    "messages": [{"role": "user", "content": prompt}]
+                }
+            )
+            
+            if openrouter_response.status_code == 200:
+                return openrouter_response.json()['choices'][0]['message']['content']
+                
+    except Exception as e:
+        print(f"फेलबैक API त्रुटि: {e}")
+        log_exception(e)
+    
+    return "❌ सभी AI सेवाएं अस्थाई रूप से अनुपलब्ध हैं। कृपया कुछ समय बाद प्रयास करें।"
 
+def call_gemini_smart_improved(prompt, history=None):
+    """क्वोटा मैनेजमेंट और फेलबैक के साथ अपडेटेड फंक्शन"""
+    if not GEMINI_API_KEY:
+        return "सेवा उपलब्ध नहीं है।"
+    
+    # सिस्टम इंस्ट्रक्शन जोड़ें (नेपाली फोंट के लिए)
+    system_instruction = """
+    आप एक मल्टीलिंगुअल असिस्टेंट हैं। 
+    नेपाली, हिंदी और अंग्रेजी सभी भाषाओं को समझें और प्रोसेस करें।
+    संख्याओं और विशेष करैक्टर्स को सही से हैंडल करें।
+    """
+    
+    # Prepare contents with system instruction and history
     contents = []
+    if system_instruction:
+        contents.append({"role": "user", "parts": [{"text": system_instruction}]})
+        contents.append({"role": "model", "parts": [{"text": "ठीक है, मैं तैयार हूँ।"}]})
+    
     if history:
         contents.extend(history)
-    contents.append({"role": "user", "parts": [prompt]})
+    
+    contents.append({"role": "user", "parts": [{"text": prompt}]})
 
-    for model_name in MODELS:
+    for model_name in FREE_TIER_MODELS: # Use the new FREE_TIER_MODELS list
+        if model_name in failed_models:
+            continue
+            
         try:
+            print(f"ट्राइंग मॉडल: {model_name}")
             response = genai_client.models.generate_content(
                 model=f"models/{model_name}",
                 contents=contents
             )
             if response and response.text:
                 return response.text
-        except ResourceExhausted:
-            return "❌ AI Quota exhausted. Try tomorrow."
+            
         except Exception as e:
-            print(f"⚠️ Model failed: {model_name} → {e}")
-            time.sleep(1)
-            continue
-    return "❌ All Gemini models failed."
+            error_msg = str(e).lower()
+            print(f"मॉडल {model_name} फेल्ड: {error_msg}")
+            
+            # क्वोटा एरर की पहचान
+            if "quota" in error_msg or "429" in error_msg or "resource exhausted" in error_msg:
+                print(f"क्वोटा समाप्त: {model_name}")
+                failed_models.add(model_name)
+                continue  # अगले मॉडल की कोशिश करें
+            elif "not found" in error_msg or "invalid" in error_msg:
+                print(f"मॉडल नहीं मिला: {model_name}")
+                failed_models.add(model_name)
+                continue
+            else:
+                # अन्य एरर - थोड़ी देर रुक कर कोशिश करें
+                time.sleep(2)
+                log_exception(e)
+                continue
+    
+    # सभी मॉडल फेल होने पर
+    return fallback_to_alternative_api(prompt)
 
 
 # ——— BOT MESSAGE HANDLERS ———
@@ -277,81 +376,257 @@ def retrieve_pdf(message):
 @bot.message_handler(commands=['ask_file'])
 def ask_from_file(message):
     query = message.text.replace('/ask_file', '').strip()
-    if not query: return bot.reply_to(message, "कृपया फाइलको बारेमा केही सोध्नुहोस्।")
-    status_msg = bot.reply_to(message, "🔍 फाइलहरूमा खोज्दै...")
+    if not query:
+        return bot.reply_to(message, "कृपया फाइलको बारेमा केही सोध्नुहोस्। उदाहरण: `/ask_file यो PDF के बारेमा छ?`")
+    
+    status_msg = bot.reply_to(message, "🔍 फाइलों में खोज रहा हूं...")
+    
     try:
+        # Step 1: Generate embedding for the query
         vector = get_embedding(query, task_type="RETRIEVAL_QUERY")
         if vector == "QUOTA_EXCEEDED":
             return bot.edit_message_text("❌ AI Quota Error: The daily free limit for asking questions has been reached. Please try again tomorrow.", status_msg.chat.id, status_msg.message_id)
         if not vector:
-            return bot.edit_message_text("❌ AI Error: तपाईंको प्रश्नको लागि भेक्टर बनाउन सकिएन। कृपया आफ्नो API कुञ्जीहरू जाँच गर्नुहोस्।", status_msg.chat.id, status_msg.message_id)
+            return bot.edit_message_text(
+                "❌ AI त्रुटि: प्रश्न का वेक्टर बनाने में असफल।",
+                status_msg.chat.id, 
+                status_msg.message_id
+            )
         
-        # Manual Similarity Search (Option 1 from user)
-        all_pdfs = list(pdf_collection.find({}, {"summary": 1, "embedding": 1, "full_text": 1, "_id": 0}))
+        # Manual Similarity Search (Option 1)
+        all_pdfs = list(pdf_collection.find({}, {"serial_number": 1, "file_name": 1, "summary": 1, "embedding": 1, "full_text": 1, "_id": 0}))
         
         if not all_pdfs:
-            return bot.edit_message_text("❌ कुनै पनि PDF हरू भेटिएनन्। कृपया पहिले PDF अपलोड गर्नुहोस्।", message.chat.id, status_msg.message_id)
+            bot.edit_message_text(
+                "📭 कुनै पनि PDF फाइल भेटिएन। AI बाट सामान्य जवाफ लिँदै छु...",
+                status_msg.chat.id, 
+                status_msg.message_id
+            )
+            general_prompt = f"User asked: {query}\n\nPlease provide a helpful answer to this question based on your general knowledge."
+            ai_response = call_gemini_smart_improved(general_prompt)
+            
+            bot.delete_message(message.chat.id, status_msg.message_id)
+            send_long_message(
+                message.chat.id, 
+                f"📘 **AI का सामान्य जवाब:**\n\n"
+                f"{ai_response}\n\n"
+                f"_💡 नोट: यो जवाफ मेरो सामान्य जानकारीमा आधारित छ, कुनै विशेष फाइलबाट होइन।_",,
+                reply_to_message_id=message.message_id,
+                parse_mode="Markdown"
+            )
+            return
 
         best_doc = None
         best_score = -1
 
         for doc in all_pdfs:
-            # Ensure the document has an embedding
             if "embedding" in doc and doc["embedding"]:
                 score = cosine_similarity(vector, doc["embedding"])
                 if score > best_score:
                     best_score = score
                     best_doc = doc
         
-        if not best_doc or best_score < 0.65:
-            return bot.edit_message_text(
-                "❌ इस सवाल से रिलेटेड कोई strong content नहीं मिला।",
-                message.chat.id, status_msg.message_id
-            )
-
-        context = best_doc['full_text'] if 'full_text' in best_doc else best_doc['summary']
-        # Apply full text limit to prevent Gemini overload
-        context = context[:3000]
-        prompt = f"Context from PDF: {context}\n\nUser Question: {query}\n\nAnswer based on context only:"
+        # Step 2: अगर कोई PDF नहीं मिला या स्कोर कम है
+                if not best_doc or best_score < 0.65: # 0.65 is the similarity threshold
+                    bot.edit_message_text(
+                        "📭 फाइलमा जानकारी भेटिएन, AI बाट सामान्य जवाफ लिँदै छु...",
+                        status_msg.chat.id,
+                        status_msg.message_id
+                    )
+                    
+                    general_prompt = f"User asked: {query}\n\nPlease provide a helpful answer to this question based on your general knowledge."
+                    ai_response = call_gemini_smart_improved(general_prompt)
+                    
+                    bot.delete_message(message.chat.id, status_msg.message_id)
+                    send_long_message(
+                        message.chat.id,
+                        f"📘 **AI का सामान्य जवाब:**\n\n"
+                        f"{ai_response}\n\n"
+                        f"_💡 नोट: यो जवाफ मेरो सामान्य जानकारीमा आधारित छ, कुनै विशेष फाइलबाट होइन।_",
+                        reply_to_message_id=message.message_id,
+                        parse_mode="Markdown"
+                    )            return
         
-        bot.edit_message_text("✍️ सान्दर्भिक जानकारी भेटियो, जवाफ तयार पार्दै...", status_msg.chat.id, status_msg.message_id)
-        ai_response = call_gemini_smart(prompt)
-
-        bot.delete_message(message.chat.id, status_msg.message_id)
-        send_long_message(message.chat.id, f"📄 **फाइलको आधारमा जवाफ:**\n\n{ai_response}", reply_to_message_id=message.message_id, parse_mode="Markdown")
-
+        # Step 3: PDF मिला है - सबसे relevant PDF का उपयोग करें
+        context = best_doc['full_text'] if 'full_text' in best_doc else best_doc['summary']
+        context = context[:3000] # Limit context to prevent Gemini overload
+        
+        bot.edit_message_text(
+            f"📄 **{best_doc['file_name']}** में खोज रहा हूं...",
+            status_msg.chat.id, 
+            status_msg.message_id
+        )
+        
+        # Enhanced prompt with page finding logic
+        enhanced_prompt = f"""
+        PDF Context (Relevant section from {best_doc['file_name']}):
+        {context}
+        
+        User Question: {query}
+        
+        Instructions:
+        1. Answer based ONLY on the given PDF context above
+        2. If information is found, mention that it's from the PDF and indicate the serial number of the PDF.
+        3. If possible, estimate which page this information might be on (e.g., "beginning," "middle," or "end" of the document, or "page X" if an exact number can be inferred from context, though exact page numbers are not available).
+        4. If information is NOT in the context, say clearly "यह जानकारी PDF में नहीं मिली।"
+        5. Answer in a natural, helpful way. Ensure all responses are primarily in Nepali if possible.
+        
+        Answer:
+        """
+        
+        ai_response = call_gemini_smart_improved(enhanced_prompt)
+        
+        # Step 5: Format the response
+        pdf_info = f"PDF #{best_doc['serial_number']} ({best_doc['file_name']})"
+        
+        # Check if AI found the answer in PDF
+        not_found_phrases = ["not found", "नहीं मिला", "जानकारी नहीं है", "not in the pdf"] # Added Nepali phrase
+        if any(phrase in ai_response.lower() for phrase in not_found_phrases):
+            # Fallback to general AI answer
+            bot.edit_message_text(
+                "📭 PDF में जानकारी नहीं मिली, AI से सामान्य जवाब ले रहा हूं...",
+                status_msg.chat.id, 
+                status_msg.message_id
+            )
+            
+            general_prompt = f"User asked: {query}\n\nPlease provide a helpful answer based on your general knowledge. Answer in Nepali."
+            ai_response = call_gemini_smart_improved(general_prompt)
+            
+            bot.delete_message(message.chat.id, status_msg.message_id)
+            send_long_message(
+                message.chat.id,
+                f"📘 **AI का सामान्य जवाब:**\n\n"
+                f"{ai_response}\n\n"
+                f"_💡 नोट: यो जवाफ मेरो सामान्य जानकारीमा आधारित छ, कुनै विशेष फाइलबाट होइन।_",,
+                reply_to_message_id=message.message_id,
+                parse_mode="Markdown"
+            )
+        else:
+            # Found in PDF - show with PDF info
+            bot.delete_message(message.chat.id, status_msg.message_id)
+            
+            # Try to extract page number from AI response
+            # Modified regex to be more flexible and capture page number hints
+            page_match = re.search(r'(पेज\s*\d+|beginning|middle|end)', ai_response.lower())
+            page_info = ""
+            if page_match:
+                page_info = f" ({page_match.group(0)})" # Use the captured group directly
+            
+            send_long_message(
+                message.chat.id,
+                f"📄 **{pdf_info}{page_info} के आधार पर:**\n\n"
+                f"{ai_response}\n\n"
+                f"_✅ जानकारी PDF से ली गई है_",
+                reply_to_message_id=message.message_id,
+                parse_mode="Markdown"
+            )
+            
     except Exception as e:
         log_exception(e)
-        bot.edit_message_text(f"माफ गर्नुहोस्, सोध्दा त्रुटि आयो: {e}", status_msg.chat.id, status_msg.message_id)
+        bot.edit_message_text(
+            f"❌ त्रुटि: {str(e)[:100]}",
+            status_msg.chat.id, 
+            status_msg.message_id
+        )
 
-@bot.message_handler(commands=['quiz'])
-def generate_pdf_quiz(message):
-    args = message.text.split()
-    if len(args) < 2: return bot.reply_to(message, "कृपया PDF नम्बर दिनुहोस्। उदाहरण: `/quiz 1`")
-    try:
-        pdf_id = int(args[1])
-        res = pdf_collection.find_one({"serial_number": pdf_id})
-        if not res: return bot.reply_to(message, "यो नम्बरको फाइल भेटिएन।")
+def ask_general_ai(message, query, status_msg=None):
+    """सामान्य AI से जवाब लें"""
+    if status_msg:
+                    bot.edit_message_text(
+                        "🤖 AI बाट सामान्य ज्ञान लिँदै छु...",
+                        status_msg.chat.id,
+                        status_msg.message_id
+                    )    else:
+        status_msg = bot.reply_to(message, "🤖 AI बाट सामान्य ज्ञान लिँदै छु...")
+    
+    prompt = f"""
+    User Question: {query}
+    
+    Instructions:
+    1. Provide a helpful, accurate answer
+    2. If you're not sure, say so
+    3. Be concise but informative
+    4. Answer in Hindi/English as appropriate. Prefer Nepali if context allows.
+    
+    Answer:
+    """
+    
+    ai_response = call_gemini_smart_improved(prompt)
+    
+    bot.delete_message(message.chat.id, status_msg.message_id)
+    send_long_message(
+        message.chat.id,
+        f"🤖 **AI को सामान्य जवाफ:**\n\n"
+        f"{ai_response}\n\n"
+        f"_💡 नोट: यो जवाफ मेरो सामान्य जानकारीमा आधारित छ, कुनै विशेष फाइलबाट होइन।_",
+        reply_to_message_id=message.message_id,
+        parse_mode="Markdown"
+    )
 
-        status_msg = bot.reply_to(message, f"⏳ {res['file_name']} बाट क्विज तयार गर्दैछु...")
-        prompt = f"Create 1 MCQ quiz in JSON based on this: {res['summary']}. Return only JSON."
-        ai_res = call_gemini_smart(prompt)
-        data = json.loads(clean_json(ai_res))
-        bot.send_poll(message.chat.id, question=data['question'][:255], options=[o[:100] for o in data['options']], correct_option_id=data['correct_option_id'], type='quiz', explanation=data.get('explanation', '')[:200])
-        bot.delete_message(message.chat.id, status_msg.message_id)
-    except Exception as e: 
-        log_exception(e)
-        bot.edit_message_text(f"त्रुटि: {e}", message.chat.id, status_msg.message_id if 'status_msg' in locals() else message.message_id)
+@bot.message_handler(commands=['ask_ai'])
+def ask_ai_command(message):
+    query = message.text.replace('/ask_ai', '').strip()
+    if not query:
+        return bot.reply_to(message, "कृपया AI बाट केही सोध्नुहोस्।")
+    ask_general_ai(message, query)
 
+
+@bot.message_handler(commands=['ask_smart'])
+def ask_smart(message):
+    """स्मार्टली डिसाइड करें - PDF में है या AI से पूछें"""
+    query = message.text.replace('/ask_smart', '').strip()
+    
+    if not query:
+        return bot.reply_to(message, "प्रश्न दर्ज करें।")
+    
+    # First, check if this is a PDF-related question
+    pdf_keywords = ['pdf', 'file', 'document', 'फाइल', 'दस्तावेज', 'पीडीएफ']
+    
+    is_pdf_question = any(keyword in query.lower() for keyword in pdf_keywords)
+    
+    if is_pdf_question:
+        # Use /ask_file logic
+        ask_from_file(message) # Note: this calls the modified ask_from_file
+    else:
+        # Direct AI chat
+        handle_chat_improved(message) # This will be the new improved handler
+
+@bot.message_handler(commands=['help'])
+def help_command(message):
+    help_text = """
+    🤖 **कमांड्स:**
+    
+    `/ask_file [प्रश्न]` - सिर्फ PDFs में खोजे (मैनुअल वेक्टर खोज)
+    `/ask_ai [प्रश्न]` - सिर्फ AI से पूछे (सामान्य ज्ञान)
+    `/ask_smart [प्रश्न]` - पहले PDF में खोजेगा अगर कीवर्ड मिलते हैं, वरना AI से पूछेगा
+    `/quiz [PDF नंबर]` - PDF पर आधारित क्विज बनाएगा
+    `/start` - बॉट का परिचय
+    
+    **उदाहरण:**
+    `/ask_file इस PDF में क्या है?`
+    `/ask_ai भारत की राजधानी क्या है?`
+    `/ask_smart machine learning क्या है?`
+    """
+    bot.reply_to(message, help_text, parse_mode="Markdown")
+
+# Modify handle_chat to incorporate the ask_smart logic
 @bot.message_handler(func=lambda message: not message.text.startswith('/'))
 def handle_chat(message):
     if message.chat.type == 'private' or (message.reply_to_message and message.reply_to_message.from_user.id == bot.get_me().id):
-        history = get_chat_history(message.from_user.id)
-        bot.send_chat_action(message.chat.id, 'typing')
-        res = call_gemini_smart(message.text, history)
-        save_chat_history(message.from_user.id, message.text, res)
-        # FIX: Use the correct variable 'res' instead of 'bot_response'
-        send_long_message(message.chat.id, res, reply_to_message_id=message.message_id)
+        # Incorporate ask_smart logic
+        query = message.text.strip()
+        pdf_keywords = ['pdf', 'file', 'document', 'फाइल', 'दस्तावेज', 'पीडीएफ']
+        is_pdf_question = any(keyword in query.lower() for keyword in pdf_keywords)
+        
+        if is_pdf_question:
+            ask_from_file(message)
+        else:
+            # Original handle_chat logic for general AI
+            history = get_chat_history(message.from_user.id)
+            bot.send_chat_action(message.chat.id, 'typing')
+            res = call_gemini_smart_improved(message.text, history)
+            save_chat_history(message.from_user.id, message.text, res)
+            send_long_message(message.chat.id, res, reply_to_message_id=message.message_id)
 
 # ——— BOT START (Render Safe) ———
 def run_bot():
