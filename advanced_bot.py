@@ -72,14 +72,16 @@ def clean_json(raw_text):
     match = re.search(r'\{.*\}', raw_text, re.DOTALL)
     return match.group(0) if match else raw_text
 
-def get_embedding(text):
+def get_embedding(text, task_type="RETRIEVAL_DOCUMENT"):
     try:
         res = genai_client.models.embed_content(
-            model="models/embedding-001",
-            content=text,
-            task_type="retrieval_document"
+            model="text-embedding-004",
+            contents=text,
+            config={
+                "task_type": task_type,
+            }
         )
-        return res['embedding']
+        return res.embeddings[0].values
     except ResourceExhausted:
         return "QUOTA_EXCEEDED"
     except Exception as e:
@@ -218,7 +220,7 @@ def handle_pdf_universal(message):
 
         summary_prompt = f"यो सामग्रीलाई खोज अनुक्रमणिकाको लागि २ वाक्यमा सारांश गर्नुहोस्: {text[:2000]}"
         summary = call_gemini_smart(summary_prompt)
-        vector = get_embedding(summary)
+        vector = get_embedding(summary, task_type="RETRIEVAL_DOCUMENT")
         if vector == "QUOTA_EXCEEDED":
             return bot.edit_message_text("❌ AI Quota Error: The daily free limit for processing new documents has been reached. Please try again tomorrow.", status_msg.chat.id, status_msg.message_id)
         if not vector: return bot.edit_message_text("❌ AI Error: Vector generation failed. Try again.", status_msg.chat.id, status_msg.message_id)
@@ -268,7 +270,7 @@ def ask_from_file(message):
     if not query: return bot.reply_to(message, "कृपया फाइलको बारेमा केही सोध्नुहोस्।")
     status_msg = bot.reply_to(message, "🔍 फाइलहरूमा खोज्दै...")
     try:
-        vector = get_embedding(query)
+        vector = get_embedding(query, task_type="RETRIEVAL_QUERY")
         if vector == "QUOTA_EXCEEDED":
             return bot.edit_message_text("❌ AI Quota Error: The daily free limit for asking questions has been reached. Please try again tomorrow.", status_msg.chat.id, status_msg.message_id)
         if not vector:
