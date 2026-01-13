@@ -121,35 +121,48 @@ def extract_vision_text(file_path):
     यसले नेपाली फन्ट र गणितीय फर्मुलाहरू (Math) एकदम सही निकाल्छ।
     """
     img_path = f"{file_path}_temp.png"
-    myfile = None # Initialize myfile to None
+    uploaded_file = None # Use a different name to avoid confusion
     try:
         # 1. PDF लाई फोटोमा बदल्ने (Zoom गरेर)
         doc = fitz.open(file_path)
-        mat = fitz.Matrix(2, 2) # 2x Zoom for better quality
+        mat = fitz.Matrix(2, 2)
         pix = doc[0].get_pixmap(matrix=mat)
-        pix.save(img_path)
         doc.close()
+        pix.save(img_path)
 
-        # 2. Gemini मा फोटो अपलोड गर्ने
+        # 2. Gemini मा फोटो अपलोड गर्ने र ACTIVE हुन पर्खिने
         print("Uploading image to Gemini for OCR...")
-        myfile = genai.upload_file(path=img_path)
+        uploaded_file = genai.upload_file(path=img_path, display_name=os.path.basename(img_path))
         
+        print(f"File uploaded: {uploaded_file.name}, State: {uploaded_file.state.name}")
+        while uploaded_file.state.name == "PROCESSING":
+            print("Waiting for file to be processed...")
+            time.sleep(4) # Increased sleep time
+            uploaded_file = genai.get_file(name=uploaded_file.name)
+            print(f"File state: {uploaded_file.state.name}")
+            
+        if uploaded_file.state.name != "ACTIVE":
+            print(f"Error: Uploaded file is not active. State: {uploaded_file.state.name}")
+            return None
+
         # 3. फोटोबाट टेक्स्ट माग्ने
         model = genai.GenerativeModel("gemini-1.5-flash")
         print("Generating content from image...")
         result = model.generate_content(
-            ["Extract all text from this document page exactly as it is. Preserve Nepali text and Math formulas.", myfile]
+            ["Extract all text from this document page exactly as it is. Preserve Nepali text and Math formulas.", uploaded_file]
         )
         return result.text
+        
     except Exception as e:
         print(f"Vision Error: {e}")
         log_exception(e)
         return None
+        
     finally:
-        # टेम्पोररी फोटो र আপলোড गरिएको फाइल डिलिट गर्ने
-        if myfile:
-            print(f"Deleting uploaded file: {myfile.name}")
-            genai.delete_file(myfile.name)
+        # टेम्पोररी फोटो र अपलोड गरिएको फाइल डिलिट गर्ने
+        if uploaded_file:
+            print(f"Deleting uploaded file: {uploaded_file.name}")
+            genai.delete_file(name=uploaded_file.name)
         if os.path.exists(img_path):
             os.remove(img_path)
 
