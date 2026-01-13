@@ -2,7 +2,7 @@ import certifi
 import telebot
 from telebot.types import Message
 from pymongo import MongoClient
-import google.genai as genai
+import google.generativeai as genai
 from google.api_core.exceptions import ResourceExhausted
 import fitz  # PyMuPDF
 import os
@@ -50,7 +50,7 @@ history_collection = db['Chat_History']
 
 # Configure Gemini with the single API key
 if GEMINI_API_KEY:
-    from google.genai import Client
+    from google.generativeai import Client
     genai_client = Client(api_key=GEMINI_API_KEY)
 else:
     print("WARNING: GEMINI_API_KEY environment variable not set.")
