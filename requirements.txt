@@ -1,8 +1,9 @@
 pyTelegramBotAPI
 pymongo
-google-genai
-google-api-core
-pymupdf
-certifi
+dnspython
+google-generativeai
+PyMuPDF
 Flask
+certifi
 requests
+gunicorn
