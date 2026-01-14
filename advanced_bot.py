@@ -438,17 +438,16 @@ def ask_from_file(message):
     try:
         vector = get_embedding(query, task_type="RETRIEVAL_QUERY")
         
-        # MongoDB बाट सबै PDF हरू तान्ने (सही फिल्डहरू: serial, file_name, embedding, text)
-        all_pdfs = list(pdf_collection.find({}, {"serial": 1, "file_name": 1, "summary": 1, "embedding": 1, "text": 1, "_id": 0}))
+        # १. डाटाबेसबाट फाइलहरू तान्ने
+        all_pdfs = list(pdf_collection.find({}, {"serial": 1, "file_name": 1, "embedding": 1, "text": 1, "_id": 0}))
         
         if not all_pdfs:
-            # यदि फाइल छैन भने AI लाई सोध्ने logic (तपाईँको साविककै कोड)
             return ask_general_ai(message, query, status_msg)
 
         best_doc = None
         best_score = -1
 
-        # Similarity Search गर्ने
+        # २. Similarity Search गर्ने
         for doc in all_pdfs:
             if "embedding" in doc and doc["embedding"]:
                 score = cosine_similarity(vector, doc["embedding"])
@@ -456,18 +455,19 @@ def ask_from_file(message):
                     best_score = score
                     best_doc = doc
         
-        # स्कोर चेक गर्ने (लुप भन्दा बाहिर)
+        # ३. स्कोर चेक गर्ने (लुप भन्दा बाहिर)
+        # यदि स्कोर ४०% भन्दा कम छ भने सामान्य AI लाई सोध्ने
         if not best_doc or best_score < 0.40: 
             return ask_general_ai(message, query, status_msg)
         
-        # डाटा निकाल्ने (KeyError बाट बच्न .get() प्रयोग गर्ने)
-        context = best_doc.get('text', best_doc.get('summary', ''))[:3500]
+        # ४. डेटा निकाल्दा .get() प्रयोग गर्ने (यसले KeyError रोक्छ)
+        context = best_doc.get('text', '')[:3500]
         f_name = best_doc.get('file_name', 'Unknown File')
         f_serial = best_doc.get('serial', 'N/A')
 
         bot.edit_message_text(f"📄 **{f_name}** मा जवाफ भेटियो, प्रोसेस गर्दैछु...", status_msg.chat.id, status_msg.message_id)
         
-        prompt = f"Context from PDF ({f_name}):\n{context}\n\nQuestion: {query}\n\nAnswer in Nepali strictly based on context."
+        prompt = f"Context from PDF (File: {f_name}):\n{context}\n\nQuestion: {query}\n\nAnswer in Nepali strictly based on the context provided."
         ai_response = call_gemini_smart_improved(prompt)
         
         bot.delete_message(message.chat.id, status_msg.message_id)
