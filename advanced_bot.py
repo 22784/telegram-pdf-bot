@@ -289,13 +289,13 @@ def call_gemini_smart_improved(prompt, history=None):
     # Prepare contents with system instruction and history
     contents = []
     if system_instruction:
-        contents.append({"role": "user", "parts": [{"text": system_instruction}]}
+        contents.append({"role": "user", "parts": [{"text": system_instruction}]})
         contents.append({"role": "model", "parts": [{"text": "ठीक है, मैं तैयार हूँ।"}]}
     
     if history:
         contents.extend(history)
     
-    contents.append({"role": "user", "parts": [{"text": prompt}]}
+    contents.append({"role": "user", "parts": [{"text": prompt}]})
 
     for model_name in WORKING_MODELS: # Use the new WORKING_MODELS list
         if model_name in failed_models:
