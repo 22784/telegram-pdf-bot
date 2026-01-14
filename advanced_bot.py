@@ -344,7 +344,6 @@ def handle_pdf(message):
 
     status_msg = bot.send_message(message.chat.id, "📥 फाइल डाउनलोड र स्क्यान गर्दै...")
     
-    # फाइल डाउनलोड
     file_info = bot.get_file(message.document.file_id)
     downloaded_file = bot.download_file(file_info.file_path)
     file_path = os.path.join(DOWNLOAD_PATH, message.document.file_name)
@@ -353,30 +352,20 @@ def handle_pdf(message):
         f.write(downloaded_file)
 
     try:
-        # १. स्मार्ट तरिकाले टेक्स्ट निकाल्ने (नयाँ कोड)
+        # १. टेक्स्ट निकाल्ने
         text, method = smart_pdf_extract(file_path)
         
-        # Improved error handling based on the method
         if method in ["Vision OCR Failed", "Extraction Failed"] or not text or not text.strip():
-            error_msg = "❌ माफ गर्नुहोस्, यो PDF बाट कुनै पाठ निकाल्न सकिएन।"
-            if method == "Vision OCR Failed":
-                error_msg += "\n\n(AI Vision द्वारा पनि प्रयास गरियो तर असफल भयो।)" # Also tried with AI Vision but it failed.
-            return bot.edit_message_text(error_msg, message.chat.id, status_msg.message_id, parse_mode="Markdown")
+            return bot.edit_message_text("❌ माफ गर्नुहोस्, यो PDF खाली छ वा पढ्न सकिएन।", message.chat.id, status_msg.message_id)
 
-        # २. डिबगिङ (तपाईंले माग्नुभएको फिचर): बोटले के पढ्यो भनेर हेर्ने
-        # यो पछि हटाउन सकिन्छ
+        # २. डिबग म्यासेज
         debug_msg = f"🔍 **DEBUG: Extracted Content ({method})**\n\n```\n{text[:800]}...\n```"
         bot.send_message(message.chat.id, debug_msg, parse_mode="Markdown")
 
-        # ३. सारांश र सेभ गर्ने (Fallback logic ব্যবহার করে)
+        # ३. सारांश र Embedding
         summary_prompt = f"Summarize this in 3 sentences: {text[:4000]}"
         summary = call_gemini_smart_improved(summary_prompt)
 
-        if not summary or "All AI services are temporarily unavailable" in summary:
-            return bot.edit_message_text("❌ AI Error: Could not generate a summary for the document.", message.chat.id, status_msg.message_id)
-        
-        
-        # Embedding (नयाँ तरिका)
         emb_result = genai.embed_content(
             model="models/text-embedding-004",
             content=summary,
@@ -384,15 +373,17 @@ def handle_pdf(message):
         )
         vector = emb_result['embedding']
 
-        # DB मा सेभ
+        # ४. DB मा सेभ (FIXED KEYS)
         serial = get_next_serial_number("pdf_id")
         pdf_collection.insert_one({
-            "serial": serial,
-            "file_name": message.document.file_name,
+            "serial": serial,                     # Key: serial
+            "file_name": message.document.file_name, # Key: file_name
+            "file_id": message.document.file_id,     # NEW: file_id (for /get command)
             "text": text,
             "summary": summary,
             "embedding": vector,
-            "uploader": message.from_user.id
+            "uploader": message.from_user.id,
+            "timestamp": time.time()
         })
 
         bot.edit_message_text(
@@ -401,7 +392,7 @@ def handle_pdf(message):
         )
 
     except Exception as e:
-        log_exception(e) # Use the logging helper
+        log_exception(e)
         bot.edit_message_text(f"❌ त्रुटि आयो: {str(e)}", message.chat.id, status_msg.message_id)
     finally:
         if os.path.exists(file_path):
@@ -410,19 +401,28 @@ def handle_pdf(message):
 @bot.message_handler(commands=['get'])
 def retrieve_pdf(message):
     if message.from_user.id != ADMIN_ID:
-        return bot.reply_to(message, "❌ सुरक्षा कारणले गर्दा PDF फाइल डाउनलोड गर्न अनुमति छैन। तपाईं यसको बारेमा AI सँग सोध्न सक्नुहुन्छ।")
-    if message.chat.type != 'private':
-        try: bot.send_message(message.from_user.id, "🛡️ सुरक्षाका लागि, म तपाईंलाई यो फाइल Private Message (PM) मा पठाउँदैछु।")
-        except: return bot.reply_to(message, "Please start a chat with me privately first so I can PM you.")
-        return bot.reply_to(message, "🛡️ म तपाईंलाई यो फाइल PM मा पठाउँदैछु।")
+        return bot.reply_to(message, "❌ Admin Only Command.")
 
     try:
         args = message.text.split()
         if len(args) < 2: return bot.reply_to(message, "नम्बर दिनुहोस्। Ex: /get 1")
+        
         index_no = int(args[1])
-        res = pdf_collection.find_one({"serial_number": index_no})
-        if res: bot.send_document(ADMIN_ID, res['file_id'], caption=f"📄 Admin Copy: {res['file_name']}")
-        else: bot.reply_to(message, "फाइल भेटिएन।")
+        
+        # FIX: 'serial' वा 'serial_number' दुबै चेक गर्ने
+        res = pdf_collection.find_one({"$or": [{"serial": index_no}, {"serial_number": index_no}]})
+        
+        if res:
+            # FIX: file_id प्रयोग गर्ने
+            file_id = res.get('file_id')
+            file_name = res.get('file_name', res.get('filename', 'document.pdf'))
+            
+            if file_id:
+                bot.send_document(ADMIN_ID, file_id, caption=f"📄 Admin Copy: {file_name}")
+            else:
+                bot.reply_to(message, "❌ यो फाइलको ID डाटाबेसमा छैन (सायद पुरानो भर्सनबाट अपलोड भएको हो)।")
+        else:
+            bot.reply_to(message, "❌ फाइल भेटिएन।")
     except Exception as e: 
         log_exception(e)
         bot.reply_to(message, f"त्रुटि भयो: {e}")
